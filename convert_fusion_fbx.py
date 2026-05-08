@@ -71,8 +71,9 @@ def extract_actions_from_fbx(filepath):
     """Extract Action data blocks from an FBX file without keeping objects."""
     temp_dir = None
 
-    # Track objects BEFORE import
+    # Track objects AND actions BEFORE import
     objects_before = set(bpy.data.objects.keys())
+    actions_before = set(a.name for a in bpy.data.actions)
 
     try:
         bpy.ops.import_scene.fbx(filepath=filepath, use_anim=True)
@@ -85,6 +86,8 @@ def extract_actions_from_fbx(filepath):
 
             old_objects = list(bpy.data.objects)
             bpy.ops.wm.read_factory_settings(use_empty=True)
+            # Track actions before converted import
+            actions_before = set(a.name for a in bpy.data.actions)
             bpy.ops.import_scene.fbx(filepath=filepath, use_anim=True)
             bpy.ops.export_scene.fbx(
                 filepath=temp_path,
@@ -95,13 +98,22 @@ def extract_actions_from_fbx(filepath):
             bpy.ops.wm.read_factory_settings(use_empty=True)
             # Track objects before converted import
             objects_before = set(bpy.data.objects.keys())
+            actions_before = set(a.name for a in bpy.data.actions)
             bpy.ops.import_scene.fbx(filepath=temp_path, use_anim=True)
             print(f"  Converted {filepath} -> {temp_path}")
         else:
             raise
 
-    # Get actions that were just imported (users == 0 means not assigned yet)
-    actions = [a for a in bpy.data.actions if a.users == 0]
+    # Get ALL newly imported actions (not just unassigned ones)
+    actions = [a for a in bpy.data.actions if a.name not in actions_before]
+
+    # Rename actions to use source filename
+    stem = get_file_stem(filepath)
+    for i, action in enumerate(actions):
+        if len(actions) == 1:
+            action.name = stem
+        else:
+            action.name = f"{stem}_{i}"
 
     # Remove ONLY the objects that were just imported
     objects_after = set(bpy.data.objects.keys())
@@ -185,6 +197,11 @@ def cleanup_temp_dirs(temp_dirs):
                 shutil.rmtree(temp_dir)
             except Exception as e:
                 print(f"  Warning: Could not clean up temp dir {temp_dir}: {e}")
+
+
+def get_file_stem(filepath):
+    """Get filename without directory and extension."""
+    return os.path.splitext(os.path.basename(filepath))[0]
 
 def export_gltf2(filepath, export_animations=True, export_format='GLB'):
     """Export scene to glTF2 format."""
@@ -285,6 +302,8 @@ def main():
             sys.exit(1)
 
         print(f"\nImporting first animation (with mesh and armature): {animation_files[0]}")
+        # Track actions before import
+        actions_before = set(a.name for a in bpy.data.actions)
         try:
             _, first_anim_path, first_temp_dir = try_import_fbx(animation_files[0], remove_mesh=False)
             if first_temp_dir:
@@ -304,6 +323,25 @@ def main():
         base_armature = armature_objects[0]
         if not base_armature.animation_data:
             base_armature.animation_data_create()
+
+        # Get newly imported actions and rename them
+        stem = get_file_stem(animation_files[0])
+        new_actions = [a for a in bpy.data.actions if a.name not in actions_before]
+        for i, action in enumerate(new_actions):
+            if len(new_actions) == 1:
+                action.name = stem
+            else:
+                action.name = f"{stem}_{i}"
+
+        # Clear existing NLA tracks and create new ones with correct names
+        if base_armature.animation_data.nla_tracks:
+            base_armature.animation_data.nla_tracks.clear()
+        for action in new_actions:
+            track = base_armature.animation_data.nla_tracks.new()
+            track.name = action.name
+            strip = track.strips.new(action.name, 0, action)
+        # Clear active action to prevent it from being exported separately
+        base_armature.animation_data.action = None
 
         # Import remaining animations
         for anim in animation_files[1:]:
